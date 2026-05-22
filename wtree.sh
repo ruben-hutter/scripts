@@ -9,16 +9,17 @@ if [ -z "$REPO_URL" ]; then
     exit 1
 fi
 
-for f in .* *; do
-    [ "$f" = "." ] || [ "$f" = ".." ] || [ "$f" = ".git" ] && continue
-    if [ -e "$f" ]; then
-        echo "❌ Error: Current directory is not empty!"
-        echo "To keep your worktree setup clean, please run this in a fresh folder."
-        exit 1
-    fi
-done
+REPO_NAME=$(basename "$REPO_URL" .git)
 
-echo "🚀 Initializing Pro Git Worktree setup..."
+if [ -d "$REPO_NAME" ]; then
+    echo "❌ Error: Directory '$REPO_NAME' already exists!"
+    exit 1
+fi
+
+mkdir "$REPO_NAME"
+cd "$REPO_NAME"
+
+echo "🚀 Initializing Pro Git Worktree setup for '$REPO_NAME'..."
 
 git clone --bare "$REPO_URL" .bare
 echo "gitdir: ./.bare" > .git
@@ -26,4 +27,4 @@ git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 git fetch --all
 
 echo "✅ Setup complete!"
-echo "Next step: git worktree add main"
+echo "Next step: cd $REPO_NAME && git worktree add main"
