@@ -20,6 +20,60 @@ else
     walrus_available=true
 fi
 
+# Absolute path to this script (used to re-invoke it from the tmux hook)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
+
+# Record of tmux sessions we have started walrus tracking for (one name per line).
+# Used by reconcile() to stop tracking when a session is deleted.
+TRACK_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-walrus/tracked"
+
+# Add a session name to the tracking record (idempotent)
+_tracked_add() {
+    local name="$1"
+    mkdir -p "$(dirname "$TRACK_FILE")"
+    touch "$TRACK_FILE"
+    grep -qxF -- "$name" "$TRACK_FILE" 2>/dev/null || printf '%s\n' "$name" >> "$TRACK_FILE"
+}
+
+# Remove a session name from the tracking record
+_tracked_remove() {
+    local name="$1"
+    [ -f "$TRACK_FILE" ] || return 0
+    local tmp="${TRACK_FILE}.tmp.$$"
+    grep -vxF -- "$name" "$TRACK_FILE" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$TRACK_FILE"
+}
+
+# Stop walrus tracking for any recorded session whose tmux session no longer
+# exists. Triggered by the global session-closed hook (see ensure_close_hook).
+reconcile() {
+    [ "$walrus_available" = true ] || return 0
+    [ -f "$TRACK_FILE" ] || return 0
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if ! tmux has-session -t "$name" 2>/dev/null; then
+            walrus stop "$name" >/dev/null 2>&1
+            _tracked_remove "$name"
+        fi
+    done < "$TRACK_FILE"
+}
+
+# Install (idempotently) a global hook so closing ANY tmux session triggers
+# reconciliation. This covers deletion paths (kill-session, choose-tree delete,
+# last window closed, ...) that never fire client-detached and would otherwise
+# leave walrus tracking running forever.
+ensure_close_hook() {
+    [ "$walrus_available" = true ] || return 0
+    tmux set-hook -g session-closed "run-shell 'bash \"$SCRIPT_PATH\" --reconcile >/dev/null 2>&1'" 2>/dev/null
+}
+
+# Internal mode: invoked by the session-closed hook to reconcile tracking.
+if [ "${1:-}" = "--reconcile" ]; then
+    reconcile
+    exit 0
+fi
+
 # Get session names
 get_sessions() {
     tmux list-sessions -F "#S" 2>/dev/null
@@ -51,7 +105,9 @@ stop_tracking_and_start_new_session() {
     # Start tracking the new session
     if [ "$walrus_available" = true ]; then
         walrus start "$new_session" 2>/dev/null
+        _tracked_add "$new_session"
         setup_detach_hook "$new_session"
+        ensure_close_hook
     fi
 }
 
