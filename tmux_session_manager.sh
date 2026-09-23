@@ -53,7 +53,8 @@ create_session() {
 
     echo "Creating new session: $session_name"
     tmux new-session -d -s "$session_name" 2>/dev/null || true
-    tmux attach-session -t "$session_name"
+    # Attach when outside tmux, switch client when inside (attach fails nested)
+    transition_to_session "$session_name" "$(get_transition_type)"
 }
 
 # Function to handle selecting an existing session or creating a new one
@@ -86,24 +87,40 @@ if [ -z "$sessions" ]; then
     fi
     create_session "$new_session"
 else
-    # Use fzf to select from existing sessions or enter a new session name
-    selected_session=$(echo "$sessions" | fzf --height 40% --reverse --query="$1" --prompt="Select existing session or type new session name: " --print-query)
+    # Use fzf to select an existing session or type a new session name.
+    # --expect=ctrl-n lets the user explicitly create a session from the typed
+    # name, even when that name fuzzy-matches an existing session (e.g. typing
+    # "home" when "homelab" exists and Enter would select "homelab").
+    # Output lines: 1 = typed query, 2 = key pressed, 3 = selection (if any)
+    # (fzf >= 0.48 prints query first, then the expect-key line)
+    fzf_output=$(echo "$sessions" | fzf \
+        --height 40% --reverse \
+        --query="$1" \
+        --print-query \
+        --expect=ctrl-n \
+        --header="enter: select session | ctrl-n: create from typed name | esc: cancel" \
+        --prompt="Session: ")
+    fzf_status=$?
 
-    # The output of fzf with --print-query gives the query as the first line and the selection as the second
-    query=$(echo "$selected_session" | head -1)
-    selection=$(echo "$selected_session" | tail -1)
+    query=$(echo "$fzf_output" | sed -n '1p')
+    fzf_key=$(echo "$fzf_output" | sed -n '2p')
+    selection=$(echo "$fzf_output" | sed -n '3p')
 
-    # Determine which session to use (selected from list or typed query)
-    if [ -n "$selection" ] && [ "$selection" != "$query" ]; then
-        # A session was selected from the list
-        session_to_use="$selection"
-    else
-        # Use the typed query as the session name
-        session_to_use="$query"
+    # 130 = interrupted with esc/ctrl-c: cancelled, do nothing
+    if [ "$fzf_status" -eq 130 ]; then
+        exit 0
     fi
 
-    # Handle the selected/typed session
-    if [ -n "$session_to_use" ]; then
-        handle_session_selection "$session_to_use"
+    if [ "$fzf_key" = "ctrl-n" ]; then
+        # Explicitly create a new session from the typed name
+        if [ -n "$query" ]; then
+            handle_session_selection "$query"
+        fi
+    elif [ -n "$selection" ]; then
+        # A session was selected from the list
+        handle_session_selection "$selection"
+    elif [ -n "$query" ]; then
+        # Enter with no matching session: treat the typed name as a new session
+        handle_session_selection "$query"
     fi
 fi
