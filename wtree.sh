@@ -1,20 +1,150 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    echo "Usage:"
+    echo "  $0 <repo-url>           # clone existing repo into worktree setup"
+    echo "  $0 --new <repo-name>    # init a new bare repo worktree setup"
+    echo "  $0 feature <name>       # create worktree <name> on branch feat/<name>"
+    echo "  $0 finish <name>       # rebase feat/<name> onto the default branch, ff-merge, remove worktree"
+}
+
 MODE="clone"
 if [ "${1:-}" = "--new" ] || [ "${1:-}" = "-n" ]; then
     MODE="init"
     shift
 fi
 
+case "${1:-}" in
+    feature) MODE="feature"; shift ;;
+    finish)  MODE="finish";  shift ;;
+esac
+
 ARG=${1:-}
 
+find_repo_root() {
+    local dir="$PWD"
+    while [ "$dir" != "/" ]; do
+        if [ -d "$dir/.bare" ]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+    return 1
+}
+
+# Resolve the repo's default branch: origin/HEAD if set, else an existing
+# local main or master, else main as a last resort.
+default_branch() {
+    local wt="$1" b
+    if b=$(git -C "$wt" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null); then
+        printf '%s\n' "${b#origin/}"
+        return 0
+    fi
+    if git -C "$wt" show-ref --verify --quiet refs/heads/main; then
+        printf 'main\n'
+    elif git -C "$wt" show-ref --verify --quiet refs/heads/master; then
+        printf 'master\n'
+    else
+        printf 'main\n'
+    fi
+}
+
 if [ -z "$ARG" ]; then
-    echo "Usage:"
-    echo "  $0 <repo-url>           # clone existing repo into worktree setup"
-    echo "  $0 --new <repo-name>    # init a new bare repo worktree setup"
+    usage
     exit 1
 fi
+
+# --- feature: create a worktree on a new feat/<name> branch -----------------
+if [ "$MODE" = "feature" ]; then
+    REPO_ROOT=$(find_repo_root) || { echo "❌ Not inside a wtree repo (no .bare directory found)"; exit 1; }
+    NAME="$ARG"
+    BRANCH="feat/$NAME"
+    WORKTREE="$REPO_ROOT/$NAME"
+
+    if [ -e "$WORKTREE" ]; then
+        echo "❌ Directory '$WORKTREE' already exists!"
+        exit 1
+    fi
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+        echo "❌ Branch '$BRANCH' already exists but has no worktree."
+        echo "   Recover it with: git -C \"$REPO_ROOT\" worktree add \"$WORKTREE\" \"$BRANCH\""
+        exit 1
+    fi
+
+    git -C "$REPO_ROOT" worktree add "$WORKTREE" -b "$BRANCH"
+    echo "✅ Feature worktree ready: $WORKTREE (branch $BRANCH)"
+    echo "Next: cd $WORKTREE"
+    exit 0
+fi
+
+# --- finish: rebase onto main, ff-merge, clean up ----------------------------
+if [ "$MODE" = "finish" ]; then
+    REPO_ROOT=$(find_repo_root) || { echo "❌ Not inside a wtree repo (no .bare directory found)"; exit 1; }
+    NAME="$ARG"
+    BRANCH="feat/$NAME"
+    WORKTREE="$REPO_ROOT/$NAME"
+
+    MAIN_WT="$REPO_ROOT/main"
+    if [ ! -d "$MAIN_WT" ] && [ -d "$REPO_ROOT/master" ]; then
+        MAIN_WT="$REPO_ROOT/master"
+    fi
+    if [ ! -d "$MAIN_WT" ]; then
+        echo "❌ No main (or master) worktree found in $REPO_ROOT"
+        exit 1
+    fi
+    if [ ! -d "$WORKTREE" ]; then
+        echo "❌ No worktree at $WORKTREE"
+        exit 1
+    fi
+    case "$PWD" in
+        "$WORKTREE"|"$WORKTREE"/*)
+            echo "❌ You are inside the worktree being finished. cd out first (e.g. cd \"$MAIN_WT\")"
+            exit 1
+            ;;
+    esac
+
+    CURRENT_BRANCH=$(git -C "$WORKTREE" branch --show-current)
+    if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
+        echo "❌ Worktree '$NAME' is on branch '$CURRENT_BRANCH', expected '$BRANCH'."
+        exit 1
+    fi
+    if [ -n "$(git -C "$WORKTREE" status --porcelain)" ]; then
+        echo "❌ '$NAME' has uncommitted changes. Commit or stash them first."
+        exit 1
+    fi
+    if [ -n "$(git -C "$MAIN_WT" status --porcelain)" ]; then
+        echo "❌ The main worktree has uncommitted changes. Clean it up first."
+        exit 1
+    fi
+
+    MAIN_BRANCH=$(default_branch "$MAIN_WT")
+
+    cd "$MAIN_WT"
+
+    echo "🔁 Rebasing $BRANCH onto $MAIN_BRANCH..."
+    if ! git -C "$WORKTREE" rebase "$MAIN_BRANCH"; then
+        git -C "$WORKTREE" rebase --abort
+        echo "❌ Rebase had conflicts — nothing was changed. Resolve them manually or ask the user."
+        exit 1
+    fi
+
+    echo "🔀 Fast-forwarding $MAIN_BRANCH..."
+    if ! git -C "$MAIN_WT" merge --ff-only "$BRANCH"; then
+        echo "❌ Fast-forward merge failed. Nothing destructive was done."
+        exit 1
+    fi
+
+    echo "🧹 Removing worktree and branch..."
+    git worktree remove "$WORKTREE"
+    git branch -d "$BRANCH"
+
+    echo "✅ Feature '$NAME' merged into $(basename "$MAIN_WT")"
+    exit 0
+fi
+
+# --- clone / init (original behavior) ----------------------------------------
 
 if [ "$MODE" = "clone" ]; then
     REPO_NAME=$(basename "$ARG" .git)
@@ -45,4 +175,5 @@ else
 fi
 
 echo "✅ Setup complete!"
-echo "Next step: cd $REPO_NAME && git worktree add main"
+DEFAULT_BRANCH=$(default_branch .)
+echo "Next step: cd $REPO_NAME && git worktree add $DEFAULT_BRANCH"
