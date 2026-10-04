@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
-# tmux session selector / creator. Pure UI: pick, create, or switch sessions.
+# tmux session selector / creator. Pure UI: pick, create, switch, or list sessions.
 # Time tracking is handled independently by tmux hooks (see tmux_walrus_hook.sh).
+#
+# Usage: tmux_session_manager.sh [initial-query]
+#        tmux_session_manager.sh -l|--list   (print all sessions and exit)
 
 # Check if tmux is installed
 if ! command -v tmux &> /dev/null; then
@@ -78,6 +81,27 @@ handle_session_selection() {
 # Get existing sessions or show a prompt for creating a new one
 sessions=$(get_sessions)
 
+# -l / --list: print all sessions and exit (fzf only shows what fits on screen;
+# this always shows everything)
+case "$1" in
+-l | --list)
+    if [ -z "$sessions" ]; then
+        echo "No tmux sessions."
+        exit 0
+    fi
+    tab=$'\t'
+    tmux list-sessions -F "#{session_name}${tab}#{session_windows}${tab}#{session_attached}" |
+    while IFS=$'\t' read -r name windows attached; do
+        marker=" "
+        [ "$name" = "$current_session" ] && marker="*"
+        suffix=""
+        [ "${attached:-0}" -gt 0 ] && suffix=" [attached]"
+        printf '%s %-30s %3s window(s)%s\n' "$marker" "$name" "$windows" "$suffix"
+    done
+    exit 0
+    ;;
+esac
+
 if [ -z "$sessions" ]; then
     # No existing sessions, prompt for a new one
     echo "No existing tmux sessions."
@@ -93,8 +117,11 @@ else
     # "home" when "homelab" exists and Enter would select "homelab").
     # Output lines: 1 = typed query, 2 = key pressed, 3 = selection (if any)
     # (fzf >= 0.48 prints query first, then the expect-key line)
+    # Adaptive height (~): shrink to fit when there are few sessions, grow to
+    # 95% of the terminal when there are many so as many as possible are
+    # visible without scrolling.
     fzf_output=$(echo "$sessions" | fzf \
-        --height 40% --reverse \
+        --height=~95% --reverse \
         --query="$1" \
         --print-query \
         --expect=ctrl-n \
