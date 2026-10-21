@@ -84,13 +84,7 @@ if [ "$MODE" = "feature" ]; then
         exit 0
     fi
 
-    if command -v pi >/dev/null 2>&1; then
-        WIN_CMD=(pi)
-    else
-        WIN_CMD=()
-    fi
-
-    if tmux new-window -d -c "$WORKTREE" "${WIN_CMD[@]}" >/dev/null 2>&1; then
+    if tmux new-window -d -c "$WORKTREE" pi >/dev/null 2>&1; then
         echo "🪟 tmux window opened in background at $WORKTREE"
     else
         echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
