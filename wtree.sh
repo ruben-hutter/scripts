@@ -5,7 +5,7 @@ usage() {
     echo "Usage:"
     echo "  $0 <repo-url>           # clone existing repo into worktree setup"
     echo "  $0 --new <repo-name>    # init a new bare repo worktree setup"
-    echo "  $0 feature <name>       # create worktree <name> on feat/<name>; opens a tmux window running pi there"
+    echo "  $0 feature <name>       # create worktree <name> on feat/<name>; inside tmux opens a pi window there"
     echo "  $0 finish <name>       # rebase feat/<name> onto the default branch, ff-merge, remove worktree"
 }
 
@@ -76,36 +76,22 @@ if [ "$MODE" = "feature" ]; then
     git -C "$REPO_ROOT" worktree add "$WORKTREE" -b "$BRANCH"
     echo "✅ Feature worktree ready: $WORKTREE (branch $BRANCH)"
 
-    # tmux: one window per feature. Inside tmux -> current session; outside ->
-    # a session named after the repo (created if needed). The window runs pi
-    # when available; WTREE_NO_PI=1 forces a plain shell.
-    if [ -n "${TMUX:-}" ]; then
-        TARGET=()
-    else
-        SESSION=$(basename "$REPO_ROOT")
-        if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-            tmux new-session -d -s "$SESSION" -c "$REPO_ROOT" 2>/dev/null || {
-                echo "⚠️  tmux session '$SESSION' unavailable — cd manually: cd $WORKTREE"
-                exit 0
-            }
-        fi
-        TARGET=(-t "=$SESSION:")
+    # tmux: when already inside tmux, open a window per feature rooted in the
+    # worktree, running pi (the window closes when pi exits). WTREE_NO_PI=1
+    # forces a plain shell instead. Outside tmux nothing is created.
+    if [ -z "${TMUX:-}" ]; then
+        echo "Next: cd $WORKTREE"
+        exit 0
     fi
 
     if command -v pi >/dev/null 2>&1 && [ -z "${WTREE_NO_PI:-}" ]; then
-        WIN_CMD=(sh -c 'pi; exec bash')
+        WIN_CMD=(pi)
     else
         WIN_CMD=()
     fi
 
-    if WIN_ID=$(tmux new-window "${TARGET[@]}" -P -F '#{window_id}' -n "$NAME" -c "$WORKTREE" "${WIN_CMD[@]}" 2>/dev/null); then
-        # Pin the feature name: stop tmux from renaming the window after pi/the shell.
-        tmux set-option -w -t "$WIN_ID" automatic-rename off >/dev/null 2>&1 || true
-        if [ -n "${TMUX:-}" ]; then
-            echo "🪟 tmux window '$NAME' opened in $WORKTREE"
-        else
-            echo "🪟 tmux window '$NAME' opened in session '$SESSION' (attach: tmux attach -t $SESSION)"
-        fi
+    if tmux new-window -c "$WORKTREE" "${WIN_CMD[@]}" >/dev/null 2>&1; then
+        echo "🪟 tmux window opened in $WORKTREE"
     else
         echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
     fi
@@ -175,8 +161,11 @@ if [ "$MODE" = "finish" ]; then
 
     echo "✅ Feature '$NAME' merged into $(basename "$MAIN_WT")"
 
-    if [ -n "${TMUX:-}" ] && tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qxF "$NAME"; then
-        echo "🪟 tmux window '$NAME' still open — close it when done: tmux kill-window -t '$NAME'"
+    if [ -n "${TMUX:-}" ]; then
+        LEFTOVER=$(tmux list-panes -a -F '#{pane_current_path}|#{window_id}' 2>/dev/null | awk -F'|' -v w="$WORKTREE" 'index($1, w) == 1 {print $2; exit}')
+        if [ -n "$LEFTOVER" ]; then
+            echo "🪟 tmux window $LEFTOVER still runs in $WORKTREE — close it: tmux kill-window -t $LEFTOVER"
+        fi
     fi
     exit 0
 fi
