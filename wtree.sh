@@ -76,22 +76,22 @@ if [ "$MODE" = "feature" ]; then
     git -C "$REPO_ROOT" worktree add "$WORKTREE" -b "$BRANCH"
     echo "✅ Feature worktree ready: $WORKTREE (branch $BRANCH)"
 
-    # tmux: when already inside tmux, open a window per feature rooted in the
-    # worktree, running pi (the window closes when pi exits). WTREE_NO_PI=1
-    # forces a plain shell instead. Outside tmux nothing is created.
+    # tmux: when already inside tmux, open a background window per feature
+    # rooted in the worktree, running pi (the window closes when pi exits).
+    # Focus stays on the current window. Outside tmux nothing is created.
     if [ -z "${TMUX:-}" ]; then
         echo "Next: cd $WORKTREE"
         exit 0
     fi
 
-    if command -v pi >/dev/null 2>&1 && [ -z "${WTREE_NO_PI:-}" ]; then
+    if command -v pi >/dev/null 2>&1; then
         WIN_CMD=(pi)
     else
         WIN_CMD=()
     fi
 
-    if tmux new-window -c "$WORKTREE" "${WIN_CMD[@]}" >/dev/null 2>&1; then
-        echo "🪟 tmux window opened in $WORKTREE"
+    if tmux new-window -d -c "$WORKTREE" "${WIN_CMD[@]}" >/dev/null 2>&1; then
+        echo "🪟 tmux window opened in background at $WORKTREE"
     else
         echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
     fi
