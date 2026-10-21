@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-languages=$(echo "python java c cpp rust go lua" | tr ' ' '\n')
+languages=$(echo "python java c cpp rust go lua haskell" | tr ' ' '\n')
 core_utils=$(echo "xargs sed awk find grep echo" | tr ' ' '\n')
 
 selected=$(printf "$languages\n$core_utils" | fzf)
