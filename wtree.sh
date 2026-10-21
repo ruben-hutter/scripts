@@ -34,21 +34,44 @@ find_repo_root() {
     return 1
 }
 
-# Resolve the repo's default branch: origin/HEAD if set, else an existing
-# local main or master, else main as a last resort.
+# Resolve the repo's default branch without hardcoding names:
+# origin/HEAD if set, else the bare repo's own HEAD (set at clone/init time
+# to the remote's default), else the user's configured default, else main.
 default_branch() {
-    local wt="$1" b
-    if b=$(git -C "$wt" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null); then
+    local repo="$1" b
+    if b=$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null); then
         printf '%s\n' "${b#origin/}"
         return 0
     fi
-    if git -C "$wt" show-ref --verify --quiet refs/heads/main; then
-        printf 'main\n'
-    elif git -C "$wt" show-ref --verify --quiet refs/heads/master; then
-        printf 'master\n'
-    else
-        printf 'main\n'
+    if b=$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null); then
+        printf '%s\n' "$b"
+        return 0
     fi
+    if b=$(git config --get init.defaultbranch 2>/dev/null) && [ -n "$b" ]; then
+        printf '%s\n' "$b"
+        return 0
+    fi
+    printf 'main\n'
+}
+
+# Print the worktree directory that has the given branch checked out.
+worktree_dir_for_branch() {
+    local repo="$1" branch="$2" wt="" b bare=0
+    while IFS= read -r line; do
+        case "$line" in
+            worktree*) wt=${line#worktree } ; bare=0 ;;
+            bare)      bare=1 ;;
+            branch*)
+                b=${line#branch refs/heads/}
+                if [ "$b" = "$branch" ] && [ "$bare" -eq 0 ] && [ -n "$wt" ] \
+                   && [ "${wt##*/}" != ".bare" ]; then
+                    printf '%s\n' "$wt"
+                    return 0
+                fi
+                ;;
+        esac
+    done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+    return 1
 }
 
 if [ -z "$ARG" ]; then
@@ -99,14 +122,26 @@ if [ "$MODE" = "finish" ]; then
     BRANCH="feat/$NAME"
     WORKTREE="$REPO_ROOT/$NAME"
 
-    MAIN_WT="$REPO_ROOT/main"
-    if [ ! -d "$MAIN_WT" ] && [ -d "$REPO_ROOT/master" ]; then
-        MAIN_WT="$REPO_ROOT/master"
+    MAIN_BRANCH=$(default_branch "$REPO_ROOT")
+    MAIN_WT=$(worktree_dir_for_branch "$REPO_ROOT" "$MAIN_BRANCH" || true)
+    if [ -z "${MAIN_WT:-}" ]; then
+        # last resort: a worktree directory named main/ or master/
+        for d in main master; do
+            if [ -d "$REPO_ROOT/$d" ] \
+               && b=$(git -C "$REPO_ROOT/$d" branch --show-current 2>/dev/null) \
+               && [ -n "$b" ]; then
+                MAIN_WT="$REPO_ROOT/$d"
+                break
+            fi
+        done
     fi
-    if [ ! -d "$MAIN_WT" ]; then
-        echo "❌ No main (or master) worktree found in $REPO_ROOT"
+    if [ -z "${MAIN_WT:-}" ]; then
+        echo "❌ No worktree for default branch '$MAIN_BRANCH' found in $REPO_ROOT"
+        echo "   Create it with: git -C \"$REPO_ROOT\" worktree add <dir> $MAIN_BRANCH"
         exit 1
     fi
+    # the merge target is whatever branch the main worktree actually holds
+    MAIN_BRANCH=$(git -C "$MAIN_WT" branch --show-current)
     if [ ! -d "$WORKTREE" ]; then
         echo "❌ No worktree at $WORKTREE"
         exit 1
@@ -131,8 +166,6 @@ if [ "$MODE" = "finish" ]; then
         echo "❌ The main worktree has uncommitted changes. Clean it up first."
         exit 1
     fi
-
-    MAIN_BRANCH=$(default_branch "$MAIN_WT")
 
     cd "$MAIN_WT"
 
