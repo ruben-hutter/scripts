@@ -5,7 +5,7 @@ usage() {
     echo "Usage:"
     echo "  $0 <repo-url>           # clone existing repo into worktree setup"
     echo "  $0 --new <repo-name>    # init a new bare repo worktree setup"
-    echo "  $0 feature <name>       # create worktree <name> on branch feat/<name>"
+    echo "  $0 feature <name>       # create worktree <name> on feat/<name>; opens a tmux window running pi there"
     echo "  $0 finish <name>       # rebase feat/<name> onto the default branch, ff-merge, remove worktree"
 }
 
@@ -75,7 +75,40 @@ if [ "$MODE" = "feature" ]; then
 
     git -C "$REPO_ROOT" worktree add "$WORKTREE" -b "$BRANCH"
     echo "✅ Feature worktree ready: $WORKTREE (branch $BRANCH)"
-    echo "Next: cd $WORKTREE"
+
+    # tmux: one window per feature. Inside tmux -> current session; outside ->
+    # a session named after the repo (created if needed). The window runs pi
+    # when available; WTREE_NO_PI=1 forces a plain shell.
+    if [ -n "${TMUX:-}" ]; then
+        TARGET=()
+    else
+        SESSION=$(basename "$REPO_ROOT")
+        if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+            tmux new-session -d -s "$SESSION" -c "$REPO_ROOT" 2>/dev/null || {
+                echo "⚠️  tmux session '$SESSION' unavailable — cd manually: cd $WORKTREE"
+                exit 0
+            }
+        fi
+        TARGET=(-t "=$SESSION:")
+    fi
+
+    if command -v pi >/dev/null 2>&1 && [ -z "${WTREE_NO_PI:-}" ]; then
+        WIN_CMD=(sh -c 'pi; exec bash')
+    else
+        WIN_CMD=()
+    fi
+
+    if WIN_ID=$(tmux new-window "${TARGET[@]}" -P -F '#{window_id}' -n "$NAME" -c "$WORKTREE" "${WIN_CMD[@]}" 2>/dev/null); then
+        # Pin the feature name: stop tmux from renaming the window after pi/the shell.
+        tmux set-option -w -t "$WIN_ID" automatic-rename off >/dev/null 2>&1 || true
+        if [ -n "${TMUX:-}" ]; then
+            echo "🪟 tmux window '$NAME' opened in $WORKTREE"
+        else
+            echo "🪟 tmux window '$NAME' opened in session '$SESSION' (attach: tmux attach -t $SESSION)"
+        fi
+    else
+        echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
+    fi
     exit 0
 fi
 
@@ -141,6 +174,10 @@ if [ "$MODE" = "finish" ]; then
     git branch -d "$BRANCH"
 
     echo "✅ Feature '$NAME' merged into $(basename "$MAIN_WT")"
+
+    if [ -n "${TMUX:-}" ] && tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qxF "$NAME"; then
+        echo "🪟 tmux window '$NAME' still open — close it when done: tmux kill-window -t '$NAME'"
+    fi
     exit 0
 fi
 
