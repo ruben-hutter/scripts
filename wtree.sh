@@ -5,7 +5,9 @@ usage() {
     echo "Usage:"
     echo "  $0 <repo-url>           # clone existing repo into worktree setup"
     echo "  $0 --new <repo-name>    # init a new bare repo worktree setup"
-    echo "  $0 feature <name>       # create worktree <name> on feat/<name>; inside tmux opens a pi window there"
+    echo "  $0 feature <name> [brief-file]"
+    echo "                          # create worktree <name> on feat/<name>; brief-file is installed"
+    echo "                          # as TASK.md and primes the pi window's first prompt (inside tmux)"
     echo "  $0 finish <name>       # rebase feat/<name> onto the default branch, ff-merge, remove worktree"
 }
 
@@ -83,11 +85,16 @@ fi
 if [ "$MODE" = "feature" ]; then
     REPO_ROOT=$(find_repo_root) || { echo "❌ Not inside a wtree repo (no .bare directory found)"; exit 1; }
     NAME="$ARG"
+    TASK_FILE="${2:-}"
     BRANCH="feat/$NAME"
     WORKTREE="$REPO_ROOT/$NAME"
 
     if [ -e "$WORKTREE" ]; then
         echo "❌ Directory '$WORKTREE' already exists!"
+        exit 1
+    fi
+    if [ -n "$TASK_FILE" ] && [ ! -f "$TASK_FILE" ]; then
+        echo "❌ Task brief file not found: $TASK_FILE"
         exit 1
     fi
     if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
@@ -99,16 +106,33 @@ if [ "$MODE" = "feature" ]; then
     git -C "$REPO_ROOT" worktree add "$WORKTREE" -b "$BRANCH"
     echo "✅ Feature worktree ready: $WORKTREE (branch $BRANCH)"
 
+    if [ -n "$TASK_FILE" ]; then
+        mv "$TASK_FILE" "$WORKTREE/TASK.md"
+        echo "📋 Task brief installed: $WORKTREE/TASK.md"
+    fi
+
     # tmux: when already inside tmux, open a background window per feature
     # rooted in the worktree, running pi (the window closes when pi exits).
-    # Focus stays on the current window. Outside tmux nothing is created.
+    # With a task brief, the fresh pi gets TASK.md attached to its first
+    # prompt so the new session starts briefed and begins working. Focus
+    # stays on the current window. Outside tmux nothing is created.
     if [ -z "${TMUX:-}" ]; then
         echo "Next: cd $WORKTREE"
         exit 0
     fi
 
-    if tmux new-window -d -c "$WORKTREE" pi >/dev/null 2>&1; then
-        echo "🪟 tmux window opened in background at $WORKTREE"
+    if [ -f "$WORKTREE/TASK.md" ]; then
+        WINDOW_CMD="pi @TASK.md 'TASK.md (attached) is your task briefing: goal, context and done-when. Follow the repo agent docs for conventions: install dependencies, apply per-worktree port offsets if documented, then carry out the task. Work only inside this worktree.'"
+    else
+        WINDOW_CMD="pi"
+    fi
+
+    if tmux new-window -d -c "$WORKTREE" "$WINDOW_CMD" >/dev/null 2>&1; then
+        if [ -f "$WORKTREE/TASK.md" ]; then
+            echo "🪟 tmux window opened in background at $WORKTREE (pi briefed from TASK.md)"
+        else
+            echo "🪟 tmux window opened in background at $WORKTREE"
+        fi
     else
         echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
     fi
@@ -153,6 +177,29 @@ if [ "$MODE" = "finish" ]; then
             ;;
     esac
 
+    # Suicide guard: the calling tmux pane may still sit in the worktree even
+    # when this script's own cwd is elsewhere (an agent cd-ing in a subshell
+    # hides it from the PWD check above). Finishing from there would delete
+    # the caller's cwd and let it kill its own window mid-turn. Refuse.
+    if [ -n "${TMUX_PANE:-}" ] && tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
+       | awk -F'|' -v p="$TMUX_PANE" -v w="$WORKTREE" \
+         '$1 == p && index($2, w) == 1 { found = 1 } END { exit !found }'; then
+        echo "❌ The calling tmux pane ($TMUX_PANE) still lives inside '$WORKTREE'."
+        echo "   Finish must run from a session outside the worktree (e.g. the main worktree window) —"
+        echo "   otherwise it deletes its own cwd and kills its own window."
+        exit 1
+    fi
+
+    # Panes living inside the worktree (the feature's pi window) are doomed:
+    # resolve them NOW, while the path still resolves — after 'worktree remove'
+    # the cwd is dangling and path matching becomes unreliable. Never the
+    # calling pane (the guard above already refused that case).
+    OCCUPYING=""
+    if [ -n "${TMUX:-}" ]; then
+        OCCUPYING=$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
+            | awk -F'|' -v p="${TMUX_PANE:-}" -v w="$WORKTREE" 'index($2, w) == 1 && $1 != p {print $1}')
+    fi
+
     CURRENT_BRANCH=$(git -C "$WORKTREE" branch --show-current)
     if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
         echo "❌ Worktree '$NAME' is on branch '$CURRENT_BRANCH', expected '$BRANCH'."
@@ -188,10 +235,22 @@ if [ "$MODE" = "finish" ]; then
 
     echo "✅ Feature '$NAME' merged into $(basename "$MAIN_WT")"
 
-    if [ -n "${TMUX:-}" ]; then
-        LEFTOVER=$(tmux list-panes -a -F '#{pane_current_path}|#{window_id}' 2>/dev/null | awk -F'|' -v w="$WORKTREE" 'index($1, w) == 1 {print $2; exit}')
-        if [ -n "$LEFTOVER" ]; then
-            echo "🪟 tmux window $LEFTOVER still runs in $WORKTREE — close it: tmux kill-window -t $LEFTOVER"
+    # Close the tmux panes that lived in the removed worktree (their windows
+    # close with them if this was their only pane). Deterministic, from code —
+    # never left to a session that might be killing itself.
+    if [ -n "$OCCUPYING" ]; then
+        KILLED=""
+        for pane in $OCCUPYING; do
+            if tmux kill-pane -t "$pane" 2>/dev/null; then
+                KILLED="$KILLED $pane"
+            fi
+        done
+        if [ -n "$KILLED" ]; then
+            echo "🪟 Closed tmux pane(s):$KILLED (they were inside the removed worktree)"
+        fi
+        if [ -n "$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
+            | awk -F'|' -v w="$WORKTREE" 'index($2, w) == 1 {print $1}')" ]; then
+            echo "⚠️  Panes still match the removed worktree path — close them manually"
         fi
     fi
     exit 0
