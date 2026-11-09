@@ -28,7 +28,10 @@ find_repo_root() {
     local dir="$PWD"
     while [ "$dir" != "/" ]; do
         if [ -d "$dir/.bare" ]; then
-            printf '%s\n' "$dir"
+            # physical path: $PWD may traverse a symlink (e.g. ~/repos ->
+            # /data) and tmux reports pane paths kernel-resolved — matching
+            # logical against physical paths silently misses panes later.
+            readlink -f -- "$dir"
             return 0
         fi
         dir=$(dirname "$dir")
@@ -177,13 +180,35 @@ if [ "$MODE" = "finish" ]; then
             ;;
     esac
 
+    # Print pane ids of panes that belong to $WORKTREE, excluding $1 (the
+    # calling pane) when set. A pane belongs when its current path OR its
+    # start path is the worktree or under it. Both path forms are matched:
+    # pane_start_path keeps whatever was passed to 'new-window -c' (possibly
+    # via a symlink like ~/repos -> /data) while pane_current_path is
+    # kernel-resolved — matching only one form silently misses panes. The
+    # start path also survives the pane's foreground process being
+    # transiently cd'd elsewhere, and '#{pane_current_path}' gains a
+    # ' (deleted)' suffix once the directory is gone, so strip that.
+    worktree_pane_ids() {
+        local exclude="${1:-}" phys
+        phys=$(readlink -f -- "$WORKTREE" 2>/dev/null || printf '%s' "$WORKTREE")
+        tmux list-panes -a -F '#{pane_id}|#{pane_start_path}|#{pane_current_path}' 2>/dev/null \
+            | awk -F'|' -v p="$exclude" -v w1="$WORKTREE" -v w2="$phys" '
+                function inwork(s) {
+                    return s == w1 || s == w2 \
+                        || index(s, w1 "/") == 1 || index(s, w2 "/") == 1
+                }
+                {
+                    cur = $3; sub(/ \(deleted\)$/, "", cur)
+                    if ($1 != p && (inwork(cur) || inwork($2))) print $1
+                }'
+    }
+
     # Suicide guard: the calling tmux pane may still sit in the worktree even
     # when this script's own cwd is elsewhere (an agent cd-ing in a subshell
     # hides it from the PWD check above). Finishing from there would delete
     # the caller's cwd and let it kill its own window mid-turn. Refuse.
-    if [ -n "${TMUX_PANE:-}" ] && tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
-       | awk -F'|' -v p="$TMUX_PANE" -v w="$WORKTREE" \
-         '$1 == p && index($2, w) == 1 { found = 1 } END { exit !found }'; then
+    if [ -n "${TMUX_PANE:-}" ] && worktree_pane_ids "" | grep -qx -- "$TMUX_PANE"; then
         echo "❌ The calling tmux pane ($TMUX_PANE) still lives inside '$WORKTREE'."
         echo "   Finish must run from a session outside the worktree (e.g. the main worktree window) —"
         echo "   otherwise it deletes its own cwd and kills its own window."
@@ -196,8 +221,7 @@ if [ "$MODE" = "finish" ]; then
     # calling pane (the guard above already refused that case).
     OCCUPYING=""
     if [ -n "${TMUX:-}" ]; then
-        OCCUPYING=$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
-            | awk -F'|' -v p="${TMUX_PANE:-}" -v w="$WORKTREE" 'index($2, w) == 1 && $1 != p {print $1}')
+        OCCUPYING=$(worktree_pane_ids "${TMUX_PANE:-}")
     fi
 
     CURRENT_BRANCH=$(git -C "$WORKTREE" branch --show-current)
@@ -237,8 +261,11 @@ if [ "$MODE" = "finish" ]; then
 
     # Close the tmux panes that lived in the removed worktree (their windows
     # close with them if this was their only pane). Deterministic, from code —
-    # never left to a session that might be killing itself.
-    if [ -n "$OCCUPYING" ]; then
+    # never left to a session that might be killing itself. Always re-scan
+    # afterwards and report leftovers: a missed match must never be silent.
+    if [ -z "${TMUX:-}" ]; then
+        echo "⚠️  Not inside tmux — the feature window for '$NAME' (if any) must be closed manually."
+    else
         KILLED=""
         for pane in $OCCUPYING; do
             if tmux kill-pane -t "$pane" 2>/dev/null; then
@@ -248,9 +275,9 @@ if [ "$MODE" = "finish" ]; then
         if [ -n "$KILLED" ]; then
             echo "🪟 Closed tmux pane(s):$KILLED (they were inside the removed worktree)"
         fi
-        if [ -n "$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
-            | awk -F'|' -v w="$WORKTREE" 'index($2, w) == 1 {print $1}')" ]; then
-            echo "⚠️  Panes still match the removed worktree path — close them manually"
+        RESIDUE=$(worktree_pane_ids "" | paste -sd' ' -)
+        if [ -n "$RESIDUE" ]; then
+            echo "⚠️  Pane(s) still belong to the removed worktree — close them manually: $RESIDUE"
         fi
     fi
     exit 0
