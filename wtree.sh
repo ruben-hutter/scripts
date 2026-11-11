@@ -117,27 +117,33 @@ if [ "$MODE" = "feature" ]; then
     # tmux: when already inside tmux, open a background window per feature
     # rooted in the worktree, running pi (the window closes when pi exits).
     # With a task brief, the fresh pi gets TASK.md attached to its first
-    # prompt so the new session starts briefed and begins working. Focus
-    # stays on the current window. Outside tmux nothing is created.
+    # prompt so the new session starts briefed and begins working; without
+    # one it is at least told where it is and to ask the user for its task,
+    # never left sitting idle. Focus stays on the current window. Outside
+    # tmux nothing is created. Either way the output states who owns the
+    # task: once a window opens, the pi inside it does, and the calling
+    # session (often an agent) must stay out of the worktree; with no
+    # window there is no handoff and the caller works in the worktree
+    # itself.
     if [ -z "${TMUX:-}" ]; then
-        echo "Next: cd $WORKTREE"
+        echo "ℹ️  Not inside tmux: no window opened, no handoff. Work in the worktree yourself: cd $WORKTREE"
         exit 0
     fi
 
     if [ -f "$WORKTREE/TASK.md" ]; then
         WINDOW_CMD="pi @TASK.md 'TASK.md (attached) is your task briefing: goal, context and done-when. Follow the repo agent docs for conventions: install dependencies, apply per-worktree port offsets if documented, then carry out the task. Work only inside this worktree.'"
     else
-        WINDOW_CMD="pi"
+        echo "⚠️  No task brief was given: the window's pi will ask the user for its task."
+        echo "   Better: write $WORKTREE/TASK.md yourself and point the window's pi at it."
+        WINDOW_CMD="pi 'You are pi in the feature worktree $WORKTREE on branch $BRANCH. No TASK.md briefing was provided: ask the user for your task before touching anything. Work only inside this worktree.'"
     fi
 
-    if tmux new-window -d -c "$WORKTREE" "$WINDOW_CMD" >/dev/null 2>&1; then
-        if [ -f "$WORKTREE/TASK.md" ]; then
-            echo "🪟 tmux window opened in background at $WORKTREE (pi briefed from TASK.md)"
-        else
-            echo "🪟 tmux window opened in background at $WORKTREE"
-        fi
+    if tmux new-window -d -n "$NAME" -c "$WORKTREE" "$WINDOW_CMD" >/dev/null 2>&1; then
+        echo "🪟 tmux window '$NAME' opened in background at $WORKTREE (branch $BRANCH)"
+        echo "🤝 The pi in that window owns this task. Do not cd into the worktree and do not"
+        echo "   do the work in this session: tell the user the task is running in window '$NAME'."
     else
-        echo "⚠️  Could not open a tmux window — cd manually: cd $WORKTREE"
+        echo "⚠️  Could not open a tmux window: no handoff. Work in the worktree yourself: cd $WORKTREE"
     fi
     exit 0
 fi
