@@ -77,9 +77,11 @@ rows() {
 		else
 			icon="🔔"
 		fi
-		printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-			"$icon $label ($age, $kind)" "$sid" "$sname" "$win" "$pane" "$kind"
-	done | sort -t$'\t' -k1,1
+		# Sort oldest-first by timestamp; the ts is a leading sort key only, cut
+		# before consumers see the rows (they expect display|sid|session|win|pane|kind).
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$ts" "$icon $label ($age, $kind)" "$sid" "$sname" "$win" "$pane" "$kind"
+	done | sort -t$'\t' -k1,1n | cut -f2-
 }
 
 count_rows() {

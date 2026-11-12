@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# tmux hook handler for the pi attention queue (see tq). DELETE-ONLY: it never
+# tmux hook handler for the pi attention queue (see pi_attention_queue.sh). DELETE-ONLY: it never
 # creates entries (that is notify.ts inside pi). Registered in .tmux.conf:
 #
 #   pane-focus-in           user is looking at that pane  -> dequeue (visit = read)
